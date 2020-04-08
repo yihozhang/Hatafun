@@ -5,15 +5,15 @@
 {-# LANGUAGE IncoherentInstances, UndecidableInstances #-}
 
 module Hatafun where
-import Prelude hiding ((^^), (^), mempty)
-import Data.Set
-import Data.Tuple
+import Prelude hiding ((^^), (^), mempty, fst, snd, and, not, length)
+import Data.Set hiding (split, take, drop)
 
-data Nat =  Z | S Nat
+data Nat =  Z | S Nat deriving (Eq, Ord)
+
 
 -- Monotone functions
 newtype a -+> b = MFun { unMFun :: a -> b }
-infixr 7 -+>
+infixr 8 -+>
 
 class MetaSemiLattice a where
     meta_bot :: a
@@ -23,6 +23,10 @@ class SemiLattice a where
     bot :: Defn a
     lub :: MonoOps repr => repr v s a -> repr v s a -> repr v s a
 
+instance MetaSemiLattice Int where
+    meta_bot = 0
+    meta_lub = max
+
 instance MetaSemiLattice a => SemiLattice a where
     bot = lift meta_bot
     lub x y = lift $ meta_lub (unlift x) (unlift y)
@@ -30,6 +34,12 @@ instance MetaSemiLattice a => SemiLattice a where
 -- equality testing is not monotone
 class EqType a where
     eq :: MonoOps repr => repr v 'Z a -> repr v 'Z a -> repr v s Bool
+
+class OrdType a where
+    leq :: MonoOps repr => repr v s a -> repr v 'Z a -> repr v s Bool
+
+instance Ord a => OrdType a where
+    leq a b = lift $ (unlift a) <= (unlift b)
 
 instance Eq a => EqType a where
     eq x y = lift $ (unlift x) == (unlift y)
@@ -152,16 +162,36 @@ type Defn a =
 unsafeUnlift :: MonoOps repr => repr 'Z 'Z a -> a
 unsafeUnlift = unlift 
 
--- Pair operators
+-- Product operators
 -- These operations could also be defined in a class as an atomic operation
 pair :: MonoOps repr => repr v s a -> repr v s b -> repr v s (a, b)
 pair a b = lift (unlift a, unlift b)
 
 fst :: MonoOps repr => repr v s (a, b) -> repr v s a
-fst p = lift (Data.Tuple.fst (unlift p))
+fst p = lift (fst' (unlift p))
+    where fst' (a, _) = a
 
 snd :: MonoOps repr => repr v s (a, b) -> repr v s b
-snd p = lift (Data.Tuple.snd (unlift p))
+snd p = lift (snd' (unlift p))
+    where snd' (_, b) = b
+
+-- Sum operators
+left :: MonoOps repr => repr v s a  -> repr v s (Either a b)
+left a = lift $ Left $ unlift a
+
+right :: MonoOps repr => repr v s b  -> repr v s (Either a b)
+right a = lift $ Right $ unlift a
+
+split :: MonoOps repr => repr v 'Z (Either a b) -> repr v s (a -> c) -> repr v s (b -> c) -> repr v s c
+split e l r = lift $ split_at (unlift e) (unlift l) (unlift r)
+    where
+        split_at (Left a) lf _ = lf a
+        split_at (Right b) _ rf = rf b
+mono_split :: MonoOps repr => repr v s (Either a b) -> repr v s (a -+> c) -> repr v s (b -+> c) -> repr v s c
+mono_split e l r = lift $ split_at (unlift e) (unMFun (unlift l)) (unMFun (unlift r))
+    where
+        split_at (Left a) lf _ = lf a
+        split_at (Right b) _ rf = rf b
 
 -- Bool operators
 tt :: Defn Bool
@@ -174,9 +204,12 @@ ff = lift False
 set :: (Ord a) => [a] -> Defn (Set a)
 set xs = lift (Data.Set.fromList xs)
 
-mbind :: (Ord a, Ord b) => Defn ((a -> Set b) -+> Set a -+> Set b)
-mbind = mlam $ \f -> mlam $ \sa -> 
-    lift $ unions $ Data.Set.map (unsafeUnlift f) (unsafeUnlift sa)
+range :: MonoOps repr => repr v 'Z Int -> repr v s Int -> repr v s (Set Int)
+range lo hi = lift $ Data.Set.fromList [(unlift lo)..(unlift hi)]
+
+mbind :: (Ord a, Ord b, MonoOps repr) =>
+    repr v s (Set a) -> repr v s (a -> Set b) -> repr v s (Set b)
+mbind sa f = lift $ unions $ Data.Set.map (unlift f) (unlift sa)
 
 mempty :: (Ord a) => Defn (Set a)
 mempty = lift $ Data.Set.empty
@@ -186,7 +219,7 @@ msingleton x = lift $ Data.Set.singleton (unlift x)
 
 mmap :: (Ord a, Ord b) => Defn ((a -> b) -> Set a -+> Set b)
 mmap = lam $ \f -> mlam $ \x ->
-    mbind `mapp` (lam $ \e -> msingleton (f `app` e)) `mapp` x
+    mbind x (lam $ \e -> msingleton (f `app` e))
 
 mfilter :: Ord a => Defn ((a -> Bool) -+> Set a -+> Set a)
 -- failed because this is not monotone (mempty can be replaced with anything)
@@ -195,29 +228,45 @@ mfilter :: Ord a => Defn ((a -> Bool) -+> Set a -+> Set a)
 --     mbind `mapp` (lam $ \e ->
 --         test (f `app` e) (msingleton `app` e) (mempty)) `mapp` x
 mfilter = mlam $ \f -> mlam $ \x ->
-    mbind `mapp` (lam $ \e ->
-        when (f `app` e) (msingleton e)) `mapp` x
+    mbind x (lam $ \e ->
+        when (f `app` e) (msingleton e))
+
+(><) :: (Ord a, Ord b, MonoOps repr) => repr v s (Set a) -> repr v s (Set b) -> repr v s (Set (a, b))
+a >< b = mbind a $ lam $ \x ->
+    mbind b $ lam $ \y ->
+        msingleton (pair x y)
+
+comp :: (Ord a, Ord b, Ord c, Eq b, MonoOps repr) =>
+    repr v s (Set (a, b)) -> repr v s (Set (b, c)) -> repr v s (Set (a, c))
+comp a b = mbind a $ lam $ \x ->
+        mbind b $ lam $ \y ->
+            let xa = fst x
+                xb = snd x
+                yb = fst y
+                yc = snd y in
+            when (eq xb yb) $
+                msingleton (pair xa yc)
+
+-- string 
+str :: MonoOps repr => String -> repr v s String
+str = lift
+
+length :: MonoOps repr => repr v 'Z String -> repr v s Int
+length s = lift $ length' $ unlift s
+    where length' [] = 0
+          length' (x:xs) = 1 + (length' xs)
+
+substring :: MonoOps repr => repr v 'Z String -> repr v 'Z Int -> repr v 'Z Int -> repr v 'Z String
+substring s lo hi = lift $ drop (unlift lo) . take (unlift hi) $ (unlift s)
+
+int :: Int -> Defn Int
+int = lift
 
 plus :: Defn (Int -+> Int -+> Int)
 plus = mlam $ \a -> mlam $ \b -> lift $ (unsafeUnlift a) + (unsafeUnlift b)
 
-(><) :: (Ord a, Ord b, MonoOps repr) => repr v s (Set a) -> repr v s (Set b) -> repr v s (Set (a, b))
-a >< b = mbind `mapp` (lam $ \x ->
-    mbind `mapp` (lam $ \y ->
-        msingleton (pair x y)) `mapp` b) `mapp` a
-
-comp :: (Ord a, Ord b, Ord c, Eq b, MonoOps repr) =>
-    repr v s (Set (a, b)) -> repr v s (Set (b, c)) -> repr v s (Set (a, c))
-comp a b = mbind `mapp` (lam $ \x ->
-        mbind `mapp` (lam $ \y ->
-            let xa = Hatafun.fst x
-                xb = Hatafun.snd x
-                yb = Hatafun.fst y
-                yc = Hatafun.snd y in
-            when (eq xb yb) $
-                msingleton (pair xa yc))
-        `mapp` b)
-    `mapp`a
+minus :: Defn (Int -+> (Int -> Int))
+minus = mlam $ \a -> lam $ \b -> lift $ (unsafeUnlift a) - (unsafeUnlift b)
 
 -- tests
 
@@ -250,6 +299,70 @@ trans = mlam $ \v -> mlam $ \e ->
 ancestor'' :: Defn (Set (String, String))
 ancestor'' = trans `mapp` persons `mapp` parent'
 
+type Sym = String
+type Rule = Either String (Sym, Sym)
+type Grammar = Set (Sym, Rule)
+type Fact = (Sym, (Int, Int))
+
+and :: Defn (Bool -+> Bool -+> Bool)
+and = mlam $ \x -> mlam $ \y -> when x (when y tt)
+not :: Defn (Bool -> Bool)
+not = lam $ \x -> test x ff tt
+
+iter :: Defn (String -> Grammar -+> Set Fact -+> Set Fact)
+iter = lam $ \text -> mlam $ \grammar -> mlam $ \chart ->
+    let n = length text
+    in mbind grammar $ lam $ \p ->
+        let a = fst p
+        in split (snd p)
+            (lam $ \s ->
+                let l = length s
+                in mbind (range (int 0) (minus `mapp` n `app` l)) $ lam $ \i ->
+                    when (eq s $ substring text i (plus `mapp` i `mapp` l)) $
+                        msingleton $ pair a $ pair i (plus `mapp` i `mapp` l))
+            (lam $ \p ->
+                let b = fst p
+                    c = snd p
+                in mbind chart (lam $ \p ->
+                    let b' = fst p
+                        i = fst $ snd p
+                        j = snd $ snd p
+                    in when (eq b b') $
+                            mbind chart $ lam $ \p ->
+                                let c' = fst p
+                                    j' = fst $ snd p
+                                    k = snd $ snd p
+                                in when (and `mapp` (eq c c') `mapp` (eq j j')) $
+                                    msingleton $ pair a $ pair i k))
+
+parse :: Defn (String -> Grammar -+> Set Sym)
+parse = lam $ \text -> mlam $ \grammar ->
+    let n = length text
+        bound = mbind grammar $ lam $ \p -> let a = fst p in
+            mbind (range (int 0) n) $ lam $ \i ->
+                mbind (range i n) $ lam $ \j ->
+                    msingleton $ pair a $ pair i j
+        chart = fix' bound $ mlam $ \c -> iter `app` text `mapp` grammar `mapp` c
+    in
+        mbind chart $ lam $ \p ->
+            when (eq (int 0) (fst (snd p))) $
+                when (eq n (snd (snd p))) $
+                    msingleton (fst p)
+
+grammar :: Defn Grammar
+grammar = set [
+    ("(", Left "("),
+    (")", Left ")"),
+    ("b", Right ("(", ")")),
+    ("b", Right ("b", "b")),
+    ("b", Right ("(", "b_)")),
+    ("b_)", Right ("b", ")"))]
+test_parse_pass :: Defn (Set Sym)
+test_parse_pass = parse `app` (str "((()())())") `mapp` grammar
+
+test_parse_fail :: Defn (Set Sym)
+test_parse_fail = parse `app` (str "()(") `mapp` grammar
+
 eval :: Defn a -> a
 eval program = unMono program
 
@@ -257,4 +370,5 @@ main = do
     print $ eval ancestor
     print $ eval ancestor'
     print $ eval ancestor''
-    -- fromList [(Earendil,Elrond),(Earendil,Arwen),(Elrond,Arwen)]
+    print $ eval test_parse_fail
+    print $ eval test_parse_pass
