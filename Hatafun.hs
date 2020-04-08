@@ -2,7 +2,7 @@
 {-# LANGUAGE KindSignatures, RankNTypes #-}
 {-# LANGUAGE DataKinds #-}
 {-# LANGUAGE FlexibleInstances, FlexibleContexts, TypeOperators #-}
-{-# LANGUAGE IncoherentInstances #-}
+{-# LANGUAGE IncoherentInstances, UndecidableInstances #-}
 
 module Hatafun where
 import Prelude hiding ((^^), (^), mempty)
@@ -14,6 +14,70 @@ data Nat =  Z | S Nat
 -- Monotone functions
 newtype a -+> b = MFun { unMFun :: a -> b }
 infixr 7 -+>
+
+class MetaSemiLattice a where
+    meta_bot :: a
+    meta_lub :: a -> a -> a
+
+class SemiLattice a where
+    bot :: Defn a
+    lub :: MonoOps repr => repr v s a -> repr v s a -> repr v s a
+
+instance MetaSemiLattice a => SemiLattice a where
+    bot = lift meta_bot
+    lub x y = lift $ meta_lub (unlift x) (unlift y)
+
+-- equality testing is not monotone
+class EqType a where
+    eq :: MonoOps repr => repr v 'Z a -> repr v 'Z a -> repr v s Bool
+
+instance Eq a => EqType a where
+    eq x y = lift $ (unlift x) == (unlift y)
+
+class FinType a where
+    elements :: [a]
+
+class (FinType a, SemiLattice a) => FiniteSemiLattice a where
+    top :: a
+
+powerset :: Ord a => [a] -> [Set a]
+powerset [] = [Data.Set.empty]
+powerset (x:xs) = [Data.Set.insert x ps | ps <- powerset xs] ++ powerset xs
+
+instance (FinType a, Ord a) => FinType (Set a) where
+    elements = powerset elements
+
+instance FinType a => FinType (a, a) where
+    elements = [(x, y) | x <- elements, y <- elements]
+
+instance (FinType a, Ord a, SemiLattice (Set a)) => FiniteSemiLattice (Set a) where
+    top = Data.Set.fromList $ elements
+
+instance MetaSemiLattice Nat where
+    meta_bot = Z
+    meta_lub = mx
+        where mx Z n = n
+              mx n Z = n
+              mx (S n) (S m) = S $ mx n m
+
+instance MetaSemiLattice Bool where
+    meta_bot = False
+    meta_lub = (||)
+
+instance FinType Bool where
+    elements = [True, False]
+
+-- instance FiniteSemiLattice Bool where
+--     top = True
+
+-- Ord is required by Set
+instance Ord a => MetaSemiLattice (Set a) where
+    meta_bot = empty
+    meta_lub = union
+
+instance MetaSemiLattice a => MetaSemiLattice (a, a) where
+    meta_bot = (meta_bot, meta_bot)
+    meta_lub (a, b) (c, d) = (meta_lub a c, meta_lub b d)
 
 type MVar repr (v :: Nat) (s :: Nat) a =
     forall (v' :: Nat) (s' :: Nat).
@@ -28,80 +92,31 @@ type Var repr (v :: Nat) (s :: Nat) a =
 class MonoOps (repr :: Nat -> Nat -> * -> *) where
     unlift :: repr v s a -> a
     lift :: a -> repr v s a
-    
-    fix :: (EqType a, FiniteSemiLattice a) => repr v s (a -+> a) -> repr v s a
-    
+    fix :: (Eq a, FiniteSemiLattice a) => repr v s (a -+> a) -> repr v s a
+    fix' :: (Eq a, MetaSemiLattice a, SemiLattice a) => repr v s a -> repr v s (a -+> a) -> repr v s a
     lam :: (Var repr v s a -> repr v s b) -> repr v s (a -> b)
     mlam :: (MVar repr v s a -> repr ('S v) ('S s) b) -> repr v s (a -+> b)
     app :: repr v s (a -> b) -> repr v 'Z a -> repr v s b
     mapp :: repr v s (a -+> b) -> repr v s a -> repr v s b
-    
     merase :: repr v s (a -+> b) -> repr v s (a -> b)
-
     test :: repr v 'Z Bool -> repr v s a -> repr v s a -> repr v s a
     when :: SemiLattice a => repr v s Bool -> repr v s a -> repr v s a
 
-class SemiLattice a where
-    bot :: MonoOps repr => repr v s a
-    lub :: Defn (a -+> a -+> a)
-
-class EqType a where
-    eq :: Defn (a -> a -> Bool)
-
-class FinType a where
-    elements :: [a]
-
--- not exactly, there are finite semi-lattices that have top
-class (FinType a, SemiLattice a) => FiniteSemiLattice a where
-    top :: Defn a
-
-powerset :: Ord a => [a] -> [Set a]
-powerset [] = [Data.Set.empty]
-powerset (x:xs) = [Data.Set.insert x ps | ps <- powerset xs] ++ powerset xs
-
-instance (FinType a, Ord a) => FinType (Set a) where
-    elements = powerset elements
-
-instance (FinType a, Ord a) => FiniteSemiLattice (Set a) where
-    top = lift $ Data.Set.fromList $ elements
-
-instance SemiLattice Nat where
-    bot = lift Z
-    lub = mlam $ \a -> mlam $ \b -> lift (mx (unsafeUnlift a) (unsafeUnlift b))
-        where mx Z n = n
-              mx n Z = n
-              mx (S n) (S m) = S $ mx n m
-
-instance SemiLattice Bool where
-    bot = ff
-    lub = mlam $ \a -> mlam $ \b -> lift $ (unsafeUnlift a) || (unsafeUnlift b)
-
-instance FinType Bool where
-    elements = [True, False]
-
-instance FiniteSemiLattice Bool where
-    top = tt
-
--- Ord is required by Set
-instance Ord a => SemiLattice (Set a) where
-    bot = mempty
-    lub = mlam $ \a -> mlam $ \b -> lift $ union (unsafeUnlift a) (unsafeUnlift b)
-
-instance SemiLattice a => SemiLattice (a, a) where
-    -- bot = let ubot = unlift (bot :: forall repr v s a. (MonoOps repr) => repr v s a) in lift (unlift bot, unlift bot)
-    bot = lift (unlift bot, unlift bot)
-
-
-newtype Mono (v :: Nat) (s :: Nat) a = Mono { unMono :: a } deriving Show
-
+newtype Mono (v :: Nat) (s :: Nat) a = Mono { unMono :: a } deriving (Show, Eq)
 instance MonoOps Mono where
     unlift = unMono
     lift = Mono
     fix f =
         let fixpoint mf x = let x' = mf x
-                            in if unMono $ eq `app` (Mono x) `app` (Mono x') 
+                            in if unMono $ eq (Mono x) (Mono x') 
                                 then x
                                 else fixpoint mf x'
+        in Mono $ fixpoint (unMFun (unMono f)) (unMono bot)
+    fix' v f = 
+        let fixpoint mf x = let x' = mf x
+                            in if v /= lub v (Mono x') then unMono v
+                            else if x == x' then x
+                            else fixpoint mf x'
         in Mono $ fixpoint (unMFun (unMono f)) (unMono bot)
     lam f = Mono $ \x -> unMono (f (Mono x))
     mlam f = Mono $ MFun (\x ->  unMono (f (Mono x)))
@@ -139,14 +154,14 @@ unsafeUnlift = unlift
 
 -- Pair operators
 -- These operations could also be defined in a class as an atomic operation
-pair :: Defn (a -+> b -+> (a, b))
-pair = mlam $ \a -> mlam $ \b -> lift (unsafeUnlift a, unsafeUnlift b)
+pair :: MonoOps repr => repr v s a -> repr v s b -> repr v s (a, b)
+pair a b = lift (unlift a, unlift b)
 
-fst :: Defn ((a, b) -+> a)
-fst = mlam $ \p -> lift (Data.Tuple.fst (unsafeUnlift p))
+fst :: MonoOps repr => repr v s (a, b) -> repr v s a
+fst p = lift (Data.Tuple.fst (unlift p))
 
-snd :: Defn ((a, b) -+> b)
-snd = mlam $ \p -> lift (Data.Tuple.snd (unsafeUnlift p))
+snd :: MonoOps repr => repr v s (a, b) -> repr v s b
+snd p = lift (Data.Tuple.snd (unlift p))
 
 -- Bool operators
 tt :: Defn Bool
@@ -166,12 +181,12 @@ mbind = mlam $ \f -> mlam $ \sa ->
 mempty :: (Ord a) => Defn (Set a)
 mempty = lift $ Data.Set.empty
 
-msingleton :: (Ord a) => Defn (a -> Set a)
-msingleton = lam $ \x -> lift $ Data.Set.singleton (unlift x)
+msingleton :: (Ord a, MonoOps repr) => repr v 'Z a -> repr v s (Set a)
+msingleton x = lift $ Data.Set.singleton (unlift x)
 
 mmap :: (Ord a, Ord b) => Defn ((a -> b) -> Set a -+> Set b)
 mmap = lam $ \f -> mlam $ \x ->
-    mbind `mapp` (lam $ \e -> msingleton `app` (f `app` e)) `mapp` x
+    mbind `mapp` (lam $ \e -> msingleton (f `app` e)) `mapp` x
 
 mfilter :: Ord a => Defn ((a -> Bool) -+> Set a -+> Set a)
 -- failed because this is not monotone (mempty can be replaced with anything)
@@ -181,40 +196,65 @@ mfilter :: Ord a => Defn ((a -> Bool) -+> Set a -+> Set a)
 --         test (f `app` e) (msingleton `app` e) (mempty)) `mapp` x
 mfilter = mlam $ \f -> mlam $ \x ->
     mbind `mapp` (lam $ \e ->
-        when (f `app` e) (msingleton `app` e)) `mapp` x
+        when (f `app` e) (msingleton e)) `mapp` x
 
 plus :: Defn (Int -+> Int -+> Int)
 plus = mlam $ \a -> mlam $ \b -> lift $ (unsafeUnlift a) + (unsafeUnlift b)
 
-(><) :: (Ord a, Ord b) => Defn (Set a -+> Set b -+> Set (a, b))
-(><) = mlam $ \a -> mlam $ \b ->
-    mbind `mapp` (lam $ \x ->
-        mbind `mapp` (lam $ \y ->
-            msingleton `app` (pair `mapp` x `mapp` y)) `mapp` b) `mapp` a
+(><) :: (Ord a, Ord b, MonoOps repr) => repr v s (Set a) -> repr v s (Set b) -> repr v s (Set (a, b))
+a >< b = mbind `mapp` (lam $ \x ->
+    mbind `mapp` (lam $ \y ->
+        msingleton (pair x y)) `mapp` b) `mapp` a
 
-comp :: (Ord a, Ord b, Ord c, EqType b) => Defn (Set (a, b) -+> Set (b, c) -+> Set (a, c))
-comp = mlam $ \a -> mlam $ \b ->
-    mbind `mapp` (lam $ \x ->
+comp :: (Ord a, Ord b, Ord c, Eq b, MonoOps repr) =>
+    repr v s (Set (a, b)) -> repr v s (Set (b, c)) -> repr v s (Set (a, c))
+comp a b = mbind `mapp` (lam $ \x ->
         mbind `mapp` (lam $ \y ->
-            let xa = Hatafun.fst `mapp` x
-                xb = Hatafun.snd `mapp` x
-                yb = Hatafun.fst `mapp` y
-                yc = Hatafun.snd `mapp` y in
-            when (eq `app` xb `app` yb) $
-                msingleton `app` (pair `mapp` xa `mapp` yc))
+            let xa = Hatafun.fst x
+                xb = Hatafun.snd x
+                yb = Hatafun.fst y
+                yc = Hatafun.snd y in
+            when (eq xb yb) $
+                msingleton (pair xa yc))
         `mapp` b)
     `mapp`a
 
-
 -- tests
 
-data Person = Earendil | Elrond | Arwen deriving (Eq, Ord)
-instance SemiLattice Person where
-    bot = lift Earendil
-    lub = mlam $ \a -> mlam $ \b -> lift (max (unsafeUnlift a) (unsafeUnlift b))
+data Person = Earendil | Elrond | Arwen deriving (Eq, Ord, Show)
+instance MetaSemiLattice Person where
+    meta_bot = Earendil
+    meta_lub = max
+instance FinType Person where
+    elements = [Earendil, Elrond, Arwen]
 instance FiniteSemiLattice Person where
-    top = lift Arwen
+    top = Arwen
+
 parent :: Defn (Set (Person, Person))
 parent = set [(Earendil, Elrond), (Elrond, Arwen)]
 ancestor :: Defn (Set (Person, Person))
-ancestor = fix $ mlam $ \x -> lub `mapp` parent `mapp` (comp `mapp` x `mapp` x)
+ancestor = fix $ mlam $ \x ->
+    lub parent (x `comp` x)
+
+persons :: Defn (Set String)
+persons = set ["earendil", "elrond", "arwen"]
+parent' :: Defn (Set (String, String))
+parent' = set [("earendil", "elrond"), ("elrond", "arwen")]
+ancestor' :: Defn (Set (String, String))
+ancestor' = fix' (persons >< persons) $ mlam $ \x -> lub parent' (x `comp` x)
+
+trans :: (Eq a, Ord a) => Defn (Set a -+> Set (a, a) -+> Set (a, a))
+trans = mlam $ \v -> mlam $ \e ->
+    fix' (v >< v) $ mlam $ \s -> lub e (s `comp` s)
+
+ancestor'' :: Defn (Set (String, String))
+ancestor'' = trans `mapp` persons `mapp` parent'
+
+eval :: Defn a -> a
+eval program = unMono program
+
+main = do
+    print $ eval ancestor
+    print $ eval ancestor'
+    print $ eval ancestor''
+    -- fromList [(Earendil,Elrond),(Earendil,Arwen),(Elrond,Arwen)]
