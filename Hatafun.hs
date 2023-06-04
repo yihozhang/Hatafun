@@ -559,8 +559,7 @@ example2 :: Exp
 example2 = Let "x" Throw (App (Var "x") someVal)
 
 example3 :: Exp
--- example3 = LetRec (M.fromList [("x", Throw)]) (App (Var "x") someVal)
-example3 = LetRec (M.fromList [("x", Throw)]) (Var "x")
+example3 = LetRec (M.fromList [("x", Throw)]) (App (Var "x") someVal)
 
 example4 :: Exp
 example4 = LetRec (M.fromList [("x", App (Var "x") Throw)]) (App (Var "x") someVal)
