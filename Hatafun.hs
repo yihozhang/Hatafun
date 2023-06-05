@@ -16,6 +16,7 @@ import qualified Data.Map
 import qualified Data.Map as M
 import Data.Set (Set)
 import qualified Data.Set
+import qualified Data.Set as S
 import Prelude hiding (and, fst, insert, length, mempty, not, snd, (^), (^^))
 
 data Nat = Z | S Nat deriving (Eq, Ord)
@@ -480,17 +481,16 @@ instance (Ord a, MetaSemiLattice b) => MetaSemiLattice (Map a b) where
   meta_lub = Data.Map.unionWith meta_lub
 
 test3 :: Defn (Graph -> Graph)
-test3 = lam $ \graph ->
-  fix reaches
-  where
-    reaches = mlam $ \graph ->
-      graph
-        `lub` mapWithKey
-          ( lam $ \k -> lam $ \vs ->
-              insert `app` k
-                `mapp` mbind vs (lam $ \v' -> graph ! v')
-          )
-          graph
+test3 = lam $ \edge_graph ->
+  let reaches = mlam $ \graph ->
+        edge_graph
+          `lub` mapWithKey
+            ( lam $ \k -> lam $ \vs ->
+                insert `app` k
+                  `mapp` mbind vs (lam $ \v' -> graph ! v')
+            )
+            graph
+   in fix reaches
 
 type V = String
 
